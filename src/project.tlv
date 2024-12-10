@@ -1,6 +1,8 @@
 \m5_TLV_version 1d: tl-x.org
 \m5
    use(m5-1.0)
+   
+
    // #################################################################
    // #                                                               #
    // #  Starting-Point Code for MEST Course Tiny Tapeout Calculator  #
@@ -54,7 +56,7 @@
          //$val2[7:0] = {4'b0, $rand2[3:0]};
          $valid = ! >>1$equals_in && $equals_in;
          $out[7:0] =
-                reset 
+                $reset 
                       ? 8'b0 :
                       $valid
                             ?
