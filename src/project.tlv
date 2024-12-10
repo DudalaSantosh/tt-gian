@@ -1,8 +1,6 @@
 \m5_TLV_version 1d: tl-x.org
 \m5
    use(m5-1.0)
-   
-
    // #################################################################
    // #                                                               #
    // #  Starting-Point Code for MEST Course Tiny Tapeout Calculator  #
