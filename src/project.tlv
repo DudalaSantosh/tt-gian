@@ -57,9 +57,7 @@
          $valid = ! >>1$equals_in && $equals_in;
          $out[7:0] =
                 $reset 
-                      ? 8'b0 :
-                      $valid
-                            ?
+                      ? 8'b0 : $valid ?
                             $op[1:0] == 2'b00
                                   ? $val1[7:0] + $val2[7:0]:
                             $op[1:0] == 2'b01
