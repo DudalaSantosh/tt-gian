@@ -2,12 +2,12 @@
 \m5
    use(m5-1.0)
    
-
-   // #################################################################
-   // #                                                               #
-   // #  Starting-Point Code for MEST Course Tiny Tapeout Calculator  #
-   // #                                                               #
-   // #################################################################
+   
+   // ########################################################
+   // #                                                      #
+   // #  Empty template for Tiny Tapeout Makerchip Projects  #
+   // #                                                      #
+   // ########################################################
    
    // ========
    // Settings
@@ -21,11 +21,9 @@
    //-------------------------------------------------------
    
    var(in_fpga, 1)   /// 1 to include the demo board. (Note: Logic will be under /fpga_pins/fpga.)
-   var(debounce_inputs, 1)
-                     /// Legal values:
-                     ///   1: Provide synchronization and debouncing on all input signals.
-                     ///   0: Don't provide synchronization and debouncing.
-                     ///   m5_if_defined_as(MAKERCHIP, 1, 0, 1): Debounce unless in Makerchip.
+   var(debounce_inputs, 0)         /// 1: Provide synchronization and debouncing on all input signals.
+                                   /// 0: Don't provide synchronization and debouncing.
+                                   /// m5_if_defined_as(MAKERCHIP, 1, 0, 1): Debounce unless in Makerchip.
    
    // ======================
    // Computed From Settings
@@ -37,63 +35,305 @@
 
 \SV
    // Include Tiny Tapeout Lab.
-   m4_include_lib(https:/['']/raw.githubusercontent.com/os-fpga/Virtual-FPGA-Lab/5744600215af09224b7235479be84c30c6e50cb7/tlv_lib/tiny_tapeout_lib.tlv)
-   // Calculator VIZ.
-   m4_include_lib(https:/['']/raw.githubusercontent.com/efabless/chipcraft---mest-course/main/tlv_lib/calculator_shell_lib.tlv)
+   m4_include_lib(['https:/']['/raw.githubusercontent.com/os-fpga/Virtual-FPGA-Lab/5744600215af09224b7235479be84c30c6e50cb7/tlv_lib/tiny_tapeout_lib.tlv'])
+   
+module uart_tx 
+    #(parameter int FREQUENCY = 10000000, parameter int BAUD_RATE = 9600)
+    (
+        input logic clk,
+        input logic reset,
+        input logic tx_dv,
+        input logic [7:0] tx_byte, 
+        output logic tx_active,
+        output logic tx_serial,
+        output logic tx_done
+    );
 
-\TLV calc()
+    typedef enum logic [2:0] {
+        s_IDLE          = 3'b000,
+        s_TX_START_BIT  = 3'b001,
+        s_TX_DATA_BITS  = 3'b010,
+        s_TX_STOP_BIT   = 3'b011,
+        s_CLEANUP       = 3'b100
+    } state_t;
+
+    localparam int CLKS_PER_BIT = FREQUENCY /  BAUD_RATE;
+
+    state_t r_SM_Main = s_IDLE;
+    logic [7:0] r_Clock_Count = 0;
+    logic [2:0] r_Bit_Index = 0;
+    logic [7:0] r_Tx_Data = 0;
+    logic r_Tx_Done = 0;
+    logic r_Tx_Active = 0;
+
+    always_ff @(posedge clk or posedge reset) begin
+        if (reset) begin
+            r_SM_Main <= s_IDLE;
+            r_Clock_Count <= 0;
+            r_Bit_Index <= 0;
+            r_Tx_Data <= 0;
+            r_Tx_Done <= 0;
+            r_Tx_Active <= 0;
+            tx_serial <= 1;
+        end else begin
+            case (r_SM_Main)
+                s_IDLE: begin
+                    tx_serial <= 1; // Line idle state
+                    r_Tx_Done <= 0;
+                    r_Clock_Count <= 0;
+                    r_Bit_Index <= 0;
+                    
+                    if (tx_dv) begin
+                        r_Tx_Active <= 1;
+                        r_Tx_Data <= tx_byte;
+                        r_SM_Main <= s_TX_START_BIT;
+                    end else begin
+                        r_SM_Main <= s_IDLE;
+                    end
+                end
+
+                s_TX_START_BIT: begin
+                    tx_serial <= 0; // Start bit
+                    if (r_Clock_Count < CLKS_PER_BIT - 1) begin
+                        r_Clock_Count <= r_Clock_Count + 1;
+                    end else begin
+                        r_Clock_Count <= 0;
+                        r_SM_Main <= s_TX_DATA_BITS;
+                    end
+                end
+
+                s_TX_DATA_BITS: begin
+                    tx_serial <= r_Tx_Data[r_Bit_Index];
+                    if (r_Clock_Count < CLKS_PER_BIT - 1) begin
+                        r_Clock_Count <= r_Clock_Count + 1;
+                    end else begin
+                        r_Clock_Count <= 0;
+                        if (r_Bit_Index < 7) begin
+                            r_Bit_Index <= r_Bit_Index + 1;
+                        end else begin
+                            r_Bit_Index <= 0;
+                            r_SM_Main <= s_TX_STOP_BIT;
+                        end
+                    end
+                end
+
+                s_TX_STOP_BIT: begin
+                    tx_serial <= 1; // Stop bit
+                    if (r_Clock_Count < CLKS_PER_BIT - 1) begin
+                        r_Clock_Count <= r_Clock_Count + 1;
+                    end else begin
+                        r_Tx_Done <= 1;
+                        r_Clock_Count <= 0;
+                        r_Tx_Active <= 0;
+                        r_SM_Main <= s_CLEANUP;
+                    end
+                end
+
+                s_CLEANUP: begin
+                    r_Tx_Done <= 1;
+                    r_SM_Main <= s_IDLE;
+                end
+
+                default: r_SM_Main <= s_IDLE;
+            endcase
+        end
+    end
+
+    assign tx_active = r_Tx_Active;
+    assign tx_done = r_Tx_Done;
+
+endmodule
+
+module uart_rx 
+    #(parameter int FREQUENCY = 20_000_000, parameter int BAUD_RATE = 9600)
+    (
+        input logic clk,
+        input logic rx_serial,          // input serial data
+        input logic reset,
+        output logic rx_done,           // asserts when reception is done
+        output logic [7:0] rx_byte      // received byte
+    );
+
+    localparam int CLKS_PER_BIT = FREQUENCY / BAUD_RATE;
+
+    typedef enum logic [2:0] {
+        s_IDLE          = 3'b000,
+        s_RX_START_BIT  = 3'b001,
+        s_RX_DATA_BITS  = 3'b010,
+        s_RX_STOP_BIT   = 3'b011,
+        s_CLEANUP       = 3'b100
+    } state_t;
+
+    state_t r_SM_Main = s_IDLE;
+
+    logic r_Rx_Data_R = 1'b1;
+    logic r_Rx_Data = 1'b1;
+
+    int unsigned r_Clock_Count = 0;
+    int unsigned r_Bit_Index = 0; // 8 bits total
+    logic [7:0] r_Rx_Byte = 8'h00;
+    logic r_Rx_DV = 1'b0;
+
+    // Purpose: Double-register the incoming data to avoid metastability
+    always_ff @(posedge clk) begin
+        r_Rx_Data_R <= rx_serial;
+        r_Rx_Data   <= r_Rx_Data_R;
+    end
+
+    // RX state machine
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            r_SM_Main      <= s_IDLE;
+            r_Rx_DV        <= 1'b0;
+            r_Clock_Count  <= 0;
+            r_Bit_Index    <= 0;
+            r_Rx_Byte      <= 8'h00;
+        end 
+        
+        else begin
+            case (r_SM_Main)
+                s_IDLE: begin
+                    r_Rx_DV       <= 1'b0;
+                    r_Clock_Count <= 0;
+                    r_Bit_Index   <= 0;
+
+                    if (r_Rx_Data == 1'b0) // Start bit detected
+                        r_SM_Main <= s_RX_START_BIT;
+                end
+
+                s_RX_START_BIT: begin
+                    if (r_Clock_Count == (CLKS_PER_BIT - 1) / 2) begin
+                        if (r_Rx_Data == 1'b0) begin
+                            r_Clock_Count <= 0;  // Reset counter, found the middle
+                            r_SM_Main     <= s_RX_DATA_BITS;
+                        end else begin
+                            r_SM_Main <= s_IDLE;
+                        end
+                    end else begin
+                        r_Clock_Count <= r_Clock_Count + 1;
+                    end
+                end
+
+                s_RX_DATA_BITS: begin
+                    if (r_Clock_Count < CLKS_PER_BIT - 1) begin
+                        r_Clock_Count <= r_Clock_Count + 1;
+                    end else begin
+                        r_Clock_Count <= 0;
+                        r_Rx_Byte[r_Bit_Index] <= r_Rx_Data;
+
+                        if (r_Bit_Index < 7) begin
+                            r_Bit_Index <= r_Bit_Index + 1;
+                        end else begin
+                            r_Bit_Index <= 0;
+                            r_SM_Main   <= s_RX_STOP_BIT;
+                        end
+                    end
+                end
+
+                s_RX_STOP_BIT: begin
+                    if (r_Clock_Count < CLKS_PER_BIT - 1) begin
+                        r_Clock_Count <= r_Clock_Count + 1;
+                    end else begin
+                        r_Rx_DV       <= 1'b1;
+                        r_Clock_Count <= 0;
+                        r_SM_Main     <= s_CLEANUP;
+                    end
+                end
+
+                s_CLEANUP: begin
+                    r_SM_Main <= s_IDLE;
+                    r_Rx_DV   <= 1'b0;
+                end
+
+                default: r_SM_Main <= s_IDLE;
+            endcase
+        end
+    end
+
+    assign rx_done = r_Rx_DV;
+    assign rx_byte = r_Rx_Byte;
+endmodule
+
+
+\TLV my_design()
    
-   
-   |calc
-      @1
-         $val2[7:0] = {4'b0, *ui_in[3:0]};
-         $op[1:0] = *ui_in[5:4];
-         $equals_in = *ui_in[7];
-         $reset = *reset;
-         //$op[1:0] = 2'b0;
-         //$val2[7:0] = 8'b1;
-         $val1[7:0] = >>1$out;
-         //$val2[7:0] = {4'b0, $rand2[3:0]};
-         $valid = ! >>1$equals_in && $equals_in;
-         $out[7:0] =
-                $reset 
-                      ? 8'b0 : $valid ?
-                            $op[1:0] == 2'b00
-                                  ? $val1[7:0] + $val2[7:0]:
-                            $op[1:0] == 2'b01
-                                  ? $val1[7:0] - $val2[7:0]:
-                            $op[1:0] == 2'b10
-                                  ? $val1[7:0] * $val2[7:0]:
-                                    $val1[7:0] / $val2[7:0] : >>1$out[7:0];
+   |uart
+      @0
+         $rx_serial = *ui_in[6];   // pmod connector's TxD port
          
-         $digit[3:0] = $out[3:0];
-         *uo_out =
-            $digit == 4'h0 ? 8'b00111111 :
-            $digit == 4'h1 ? 8'b00000110 :
-            $digit == 4'h2 ? 8'b01011011 :
-            $digit == 4'h3 ? 8'b01001111 :
-            $digit == 4'h4 ? 8'b01100110 :
-            $digit == 4'h5 ? 8'b01101101 :
-            $digit == 4'h6 ? 8'b01111101 :
-            $digit == 4'h7 ? 8'b00000111 :
-            $digit == 4'h8 ? 8'b01111111 :
-            $digit == 4'h9 ? 8'b01101111 :
-            $digit == 4'hA ? 8'b01110111 :
-            $digit == 4'hB ? 8'b01111100 :
-            $digit == 4'hC ? 8'b00111001 :
-            $digit == 4'hD ? 8'b01011110 :
-            $digit == 4'hE ? 8'b01111001 :
-                             8'b01110001;
+         // uart receiver can be integrated the following way
+         \SV_plus
+            uart_rx #(20000000,115200) uart_rx_1(.clk(*clk),
+                                            .reset(*reset),
+                                            .rx_serial($rx_serial),
+                                            .rx_done($$rx_done),
+                                            .rx_byte($$rx_byte[7:0])
+                                            );
          
-         
+         //$tx_byte[7:0] = {*ui_in[7:0]};
+         $received = $rx_done;
+         *uo_out[7] = $received;
+         $received_byte[7:0] = $rx_byte[7:0];
+
+         // display the LS nibble on the seven seg
+         $digit[3:0] = $received_byte[3:0];
+
+      @1 //display logic
+         *uo_out =   $digit == 4'd0
+                         ? 8'b0011_1111 :
+                     $digit == 4'd1
+                         ? 8'b00000110 :
+                     $digit == 4'd2
+                         ? 8'b01011011 :
+                     $digit == 4'd3
+                         ? 8'b01001111 :
+                     $digit == 4'd4
+                         ? 8'b01100110 :
+                     $digit == 4'd5
+                         ? 8'b01101101 :
+                     $digit == 4'd6
+                         ? 8'b01111101 :
+                     $digit == 4'd7
+                         ? 8'b00000111 :
+                     $digit == 4'd8
+                         ? 8'b01111111 :
+                     $digit == 4'd9
+                         ? 8'b01101111 :
+                     $digit == 4'd10
+                         ? 8'b01110111 :
+                     $digit == 4'd11
+                         ? 8'b01111100 :
+                     $digit == 4'd12
+                         ? 8'b00111001 :
+                     $digit == 4'd13
+                         ? 8'b01011110 :
+                     $digit == 4'd14
+                         ? 8'b01111001 :
+                     $digit == 4'd15
+                         ? 8'b01110001 :
+                         8'b00000000;
    
 
-   m5+cal_viz(@1, m5_if(m5_in_fpga, /fpga, /top))
+   
+   
+   // Note that pipesignals assigned here can be found under /fpga_pins/fpga.
+   
+   
+   
    
    // Connect Tiny Tapeout outputs. Note that uio_ outputs are not available in the Tiny-Tapeout-3-based FPGA boards.
-   *uo_out = 8'hff;
+   //*uo_out = 8'b0;
    m5_if_neq(m5_target, FPGA, ['*uio_out = 8'b0;'])
    m5_if_neq(m5_target, FPGA, ['*uio_oe = 8'b0;'])
+
+// Set up the Tiny Tapeout lab environment.
+\TLV tt_lab()
+   // Connect Tiny Tapeout I/Os to Virtual FPGA Lab.
+   m5+tt_connections()
+   // Instantiate the Virtual FPGA Lab.
+   m5+board(/top, /fpga, 7, $, , my_design)
+   // Label the switch inputs [0..7] (1..8 on the physical switch panel) (top-to-bottom).
+   m5+tt_input_labels_viz(['"UNUSED", "UNUSED", "UNUSED", "UNUSED", "UNUSED", "UNUSED", "UNUSED", "UNUSED"'])
 
 \SV
 
@@ -106,13 +346,27 @@ module top(input logic clk, input logic reset, input logic [31:0] cyc_cnt, outpu
    // Tiny tapeout I/O signals.
    logic [7:0] ui_in, uo_out;
    m5_if_neq(m5_target, FPGA, ['logic [7:0] uio_in, uio_out, uio_oe;'])
-   logic [31:0] r;
+   logic [31:0] r;  // a random value
    always @(posedge clk) r <= m5_if_defined_as(MAKERCHIP, 1, ['$urandom()'], ['0']);
    assign ui_in = r[7:0];
    m5_if_neq(m5_target, FPGA, ['assign uio_in = 8'b0;'])
    logic ena = 1'b0;
    logic rst_n = ! reset;
    
+   /*
+   // Or, to provide specific inputs at specific times (as for lab C-TB) ...
+   // BE SURE TO COMMENT THE ASSIGNMENT OF INPUTS ABOVE.
+   // BE SURE TO DRIVE THESE ON THE B-PHASE OF THE CLOCK (ODD STEPS).
+   // Driving on the rising clock edge creates a race with the clock that has unpredictable simulation behavior.
+   initial begin
+      #1  // Drive inputs on the B-phase.
+         ui_in = 8'h0;
+      #10 // Step 5 cycles, past reset.
+         ui_in = 8'hFF;
+      // ...etc.
+   end
+   */
+
    // Instantiate the Tiny Tapeout module.
    m5_user_module_name tt(.*);
    
@@ -145,17 +399,20 @@ module m5_user_module_name (
 );
    wire reset = ! rst_n;
 
-\TLV tt_lab()
-   // Connect Tiny Tapeout I/Os to Virtual FPGA Lab.
-   m5+tt_connections()
-   // Instantiate the Virtual FPGA Lab.
-   m5+board(/top, /fpga, 7, $, , calc)
-   // Label the switch inputs [0..7] (1..8 on the physical switch panel) (top-to-bottom).
-   m5_if(m5_in_fpga, ['m5+tt_input_labels_viz(['"Value[0]", "Value[1]", "Value[2]", "Value[3]", "Op[0]", "Op[1]", "Op[2]", "="'])'])
+   // List all potentially-unused inputs to prevent warnings
+   wire _unused = &{ena, clk, rst_n, 1'b0};
 
 \TLV
    /* verilator lint_off UNOPTFLAT */
-   m5_if(m5_in_fpga, ['m5+tt_lab()'], ['m5+calc()'])
+   m5_if(m5_in_fpga, ['m5+tt_lab()'], ['m5+my_design()'])
+
+\SV_plus
+   // ==========================================
+   // If you are using Verilog for your design,
+   // your Verilog logic goes here.
+   // Note, output assignments are in my_design.
+   // ==========================================
 
 \SV
+
 endmodule
